@@ -2,9 +2,6 @@ FROM node:alpine
 
 WORKDIR '/app'
 
-# Looks like this variable will be used to keep running 'npm run test' from running forever:
-ENV CI=true
-
 COPY package.json .
 RUN npm install
 
