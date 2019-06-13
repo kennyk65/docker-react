@@ -1,0 +1,28 @@
+
+version: '3'
+
+# services basically mean type of container:
+services:
+
+  # React app, dev mode
+  frontend-app:
+    container_name: dev-app
+    build: 
+      context: .
+      dockerfile: Dockerfile.dev
+    ports:
+      - "3000:3000"   # host to container mapping
+    volumes:
+      - /app/node_modules
+      - .:/app
+  # Test execution
+  tests:
+    container_name: test-app
+    build: 
+      context: .
+      dockerfile: Dockerfile.dev
+    volumes:
+      - /app/node_modules
+      - .:/app
+    command: ["npm", "run", "test"]
+    
