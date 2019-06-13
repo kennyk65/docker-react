@@ -82,8 +82,7 @@ Resources:
         Statement: 
           Effect: Allow
           Action: 
-            - logs:CreateLogGroup
-            - logs:CreateLogStream
+            - logs:CreateLog*
             - logs:PutLogEvents
             - s3:putObject
             - s3:getObject
@@ -92,6 +91,7 @@ Resources:
             - ecr:InitiateLayerUpload     # For Docker push to ECR
             - ecr:Upload*                 # For Docker push to ECR
             - ecr:Complete*               # For Docker push to ECR
+            - ecr:*                       # For Docker push to ECR.  Can't figure out what other permission I need.
           Resource: "*"
       Roles: 
         -  !Ref CodeBuildRole
@@ -215,7 +215,7 @@ Resources:
               post_build:
                 commands:
                   - echo Pushing the Docker images...
-                  - docker push $REPOSITORY_URI:latest
+                  - docker push $REPOSITORY_URI
                   - echo Creating the Dockerrun.aws.json file needed by ElasticBeanstalk
                   - printf '{"AWSEBDockerrunVersion":"1","Image":{"Name":"%s"},"Ports":[{"ContainerPort":80,"HostPort":80}]}' $REPOSITORY_URI:latest > Dockerrun.aws.json 
             artifacts:
