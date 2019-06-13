@@ -2,8 +2,8 @@ AWSTemplateFormatVersion: 2010-09-09
 
 # This is a  codepipeline demo that 
 # 1) grabs code from GitHub on change 
-# 2) packages and tests using parallel actions 
-# 3) Docker-izes it, and stores in ECR
+# 2) builds, dockerizes, and tests a NodeJS app. 
+# 3) Stores image in ECR
 # 4) deploys it to ElasticBeanstalk
 
 # TO RUN THIS:  You'll need a GitHub Repository, and a GitHub OAuthToken.
@@ -21,19 +21,15 @@ Metadata:
           - GitHubRepository
           - GitHubOAuthToken
       - Label:
-          default: Target ECS Cluster
-        Parameters:
-          - DockerRepository
-          - ContainerName
-      - Label:
           default: Other
         Parameters:
+          - DockerImageName
           - CodePipelineBucketPrefix
 
 Parameters:
   GitHubRepository:
     Type: String
-    Default:  kennyk65/docker-react
+    Default:  kennyk65/docker-react/master
     Description:  The owner / repository / branch that you want to pull from.
 
   GitHubOAuthToken:
@@ -41,13 +37,8 @@ Parameters:
     Default:  b45b4b39fe35179592ceb5259c481b05a0eb27d
     Description:  CodePipeline sources require an OAuthToken, even if they are public.  To make one go to GitHub / Settings / Personal Access Tokens 
 
-  DockerRepository:
-    Description:  The name of the existing ECR repository, no tag.  You'll have to create one and initially push to it the docker image that you want to demo.  CodeBuild will push an updated Docker image here when built.  Check that Region and account number.
-    Type: String
-    Default: 011673140073.dkr.ecr.us-west-2.amazonaws.com/spring-cloud-aws-environment-demo
-
-  ContainerName:
-    Description:  The label of the container as seen on the task definition that will be created.  Just used to visually identify your container later.  I usually make mine based on the Docker image name.
+  DockerImageName:
+    Description:  The label of the image to be created and deployed to Beanstalk. 
     Type: String
     Default:  docker-react
 
@@ -58,6 +49,13 @@ Parameters:
 
 
 Resources:
+
+  # Amazon ECR Registry will hold our image after built / before deployed.
+  ECRRepo:
+    Type: AWS::ECR::Repository
+    Properties: 
+      RepositoryName: !Ref DockerImageName
+
 
   # This Role allows CodeBuild to do certain things on our behalf.
   # See the policy for the interesting stuff:
@@ -94,7 +92,6 @@ Resources:
             - ecr:InitiateLayerUpload     # For Docker push to ECR
             - ecr:Upload*                 # For Docker push to ECR
             - ecr:Complete*               # For Docker push to ECR
-            - ecr:*                       # I'm getting weird results on Docker push, and this fixed it.  TODO - Figure out what ECR permissions are needed.
           Resource: "*"
       Roles: 
         -  !Ref CodeBuildRole
@@ -123,25 +120,28 @@ Resources:
         Version: 2012-10-17
         Statement: 
           Effect: Allow
-          # I can't quite determine which S3 permission CodePipeline wants.  The one-click policy grants everything...
-          # codebuild probably does not need to be wide open like this, and the logs should only need
-          # to create the stream, group, and log events.
-          # Ultimately I ran into too many permission errors with little information available in the documentation to debug, so I had to use "*".
+          # Permissions are estimated based on what is automatically generated using the console.
           Action: 
-            # - logs:CreateLogGroup
-            # - logs:CreateLogStream
-            # - logs:PutLogEvents
-            # - s3:putObject
-            # - s3:getObject
-            # - codebuild:*
-            # - elasticbeanstalk:*
-            - "*"                             #  TODO - FIND OUT WHAT CODE PIPELINE permissions are needed.
+            - s3:Get*
+            - s3:PutObject
+            - ec2:*
+            - elasticloadbalancing:*
+            - autoscaling:*
+            - cloudwatch:*
+            - elasticbeanstalk:*
+            - cloudformation:*
+            - s3:*
+            - sns:*
+            - sqs:*
+            - codebuild:BatchGetBuilds
+            - codebuild:StartBuild
+            - iam:PassRole
           Resource: 
             - "*"
       Roles: 
         -  !Ref CodePipelineRole
 
-  # This Role is given to the ElasticBeanstalk environment:
+  # This Role is given to the ElasticBeanstalk service to allow it to create environments:
   BeanstalkServiceRole:
     Type: AWS::IAM::Role
     Properties: 
@@ -151,32 +151,11 @@ Resources:
         Statement: 
           Effect: Allow
           Principal:
-            Service: "elasticbeanstalk.amazonaws.com"
-          Action: "sts:AssumeRole"
-
-  # This Policy is attached to the BeanstalkServiceRole.
-  BeanstalkServicePolicy:
-    Type: AWS::IAM::Policy
-    Properties: 
-      PolicyName: !Sub ${AWS::StackName}-BeanstalkServicePolicy
-      PolicyDocument: 
-        Version: 2012-10-17
-        Statement: 
-          Effect: Allow
-          # I'm not sure exactly what permissions are needed here.  Docs are nearly impossible.
-          Action: 
-            - elasticbeanstalk:*
-            - elasticloadbalancing:Describe*
-            - ec2:Describe*
-            - ec2:Get*
-            - ec2:Associate*
-            - logs:*
-            - s3:*
-            - autoscaling:*   
-          Resource: 
-            - "*"
-      Roles: 
-        -  !Ref BeanstalkServiceRole
+            Service: elasticbeanstalk.amazonaws.com
+          Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSElasticBeanstalkEnhancedHealth
+        - arn:aws:iam::aws:policy/service-role/AWSElasticBeanstalkService
 
   # This Role allows the EC2 Instance created by Elastic Beanstalk to make ECR calls.
   BeanstalkInstanceRole:
@@ -192,10 +171,7 @@ Resources:
           Action: sts:AssumeRole
       ManagedPolicyArns:
         - arn:aws:iam::aws:policy/CloudWatchFullAccess
-        - arn:aws:iam::aws:policy/AWSElasticBeanstalkWebTier
-        - arn:aws:iam::aws:policy/AWSElasticBeanstalkWorkerTier
-        - arn:aws:iam::aws:policy/AWSCloudFormationReadOnlyAccess
-
+        - arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly
 
   # General Bucket where CodePipeline will store things:
   # Warning: This will need to be deleted manually before you can delete the stack.
@@ -204,7 +180,7 @@ Resources:
     Properties: 
       BucketName: !Sub ${CodePipelineBucketPrefix}${AWS::Region}
 
-
+  # Build process for our Docker image
   DockerBuild:
     Type: AWS::CodeBuild::Project
     Properties: 
@@ -220,31 +196,28 @@ Resources:
             phases:
               pre_build:
                 commands:
-                  - echo Version of AWS CLI is
+                  - # Show current version of CLI, Docker, etc.:
                   - aws --version
-                  - echo Version of Docker is
                   - docker --version
                   - echo Logging in to Amazon ECR...
                   - $(aws ecr get-login --region $AWS_DEFAULT_REGION --no-include-email)
-                  - REPOSITORY_URI=${DockerRepository}   
-                  - IMAGE_TAG=1111
+                  - REPOSITORY_URI=${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${DockerImageName}
                   - echo REPOSITORY_URI is set to $REPOSITORY_URI
-                  - echo IMAGE_TAG is set to $IMAGE_TAG
-                  - echo CODEBUILD_RESOLVED_SOURCE_VERSION is set to $CODEBUILD_RESOLVED_SOURCE_VERSION
-                  - echo CODEBUILD_SOURCE_VERSION is set to $CODEBUILD_SOURCE_VERSION
               build:
                 commands:
-                  - echo Docker Image Build started on `date`
+                  - echo Building temporary image for testing on `date`
+                  - docker build -f Dockerfile.dev -t test-image .
+                  - echo Temporary image finished on `date`.  Starting test...
+                  - docker run -e CI=true test-image npm run test -- --coverage
+                  - echo Testing complete on `date`.  Building prod image...
                   - docker build -t $REPOSITORY_URI:latest .
-                  - docker tag $REPOSITORY_URI:latest $REPOSITORY_URI:$IMAGE_TAG
-                  - echo Docker Image Build finished on `date`
+                  - echo Prod image built on `date`.
               post_build:
                 commands:
                   - echo Pushing the Docker images...
                   - docker push $REPOSITORY_URI:latest
-                  - docker push $REPOSITORY_URI:$IMAGE_TAG
                   - echo Creating the Dockerrun.aws.json file needed by ElasticBeanstalk
-                  - printf '{"AWSEBDockerrunVersion":"1","Image":{"Name":"%s"},"Ports":[{"ContainerPort":8080,"HostPort":80}]}' $REPOSITORY_URI:$IMAGE_TAG > Dockerrun.aws.json 
+                  - printf '{"AWSEBDockerrunVersion":"1","Image":{"Name":"%s"},"Ports":[{"ContainerPort":80,"HostPort":80}]}' $REPOSITORY_URI:latest > Dockerrun.aws.json 
             artifacts:
                 files: Dockerrun.aws.json
       Environment:
@@ -255,12 +228,11 @@ Resources:
         Type: CODEPIPELINE
 
 
-
   # This is the CodePipeline with its stages:
   MyPipe:
     Type: AWS::CodePipeline::Pipeline
     Properties:
-      Name: !Sub ${AWS::StackName}-PipeFromGitHubToECS
+      Name: !Sub ${AWS::StackName}-PipeFromGitHubToBeanstalk
       ArtifactStore: 
         Location: !Ref S3
         Type: S3
@@ -275,9 +247,9 @@ Resources:
               RunOrder: 1
               ActionTypeId: 
                 Category: Source
-                Owner: ThirdParty       
-                Provider: GitHub        
-                Version: 1              # Required, meaningless and must be 1, go figure.
+                Owner: ThirdParty 
+                Provider: GitHub 
+                Version: 1         # Required, meaningless and must be 1, go figure.
               Configuration: 
                 Owner: !Select [0, !Split [ "/" , !Ref GitHubRepository ]]
                 Repo: !Select [1, !Split [ "/" , !Ref GitHubRepository ]]
@@ -301,9 +273,9 @@ Resources:
                 Provider: CodeBuild        
                 Version: 1                      # Required, meaningless and must be 1.
               Configuration:
-                ProjectName:  !Ref DockerBuild  # See the CodeBuild definition above.       
+                ProjectName:  !Ref DockerBuild  # See the CodeBuild definition above. 
               OutputArtifacts: 
-                - Name: TheDockerrunAwsJson 
+                - Name: TheDockerrunAwsJson     # A little JSON file that tells Beanstalk the image to run
 
         # Stage 3:  Deploy on ElasticBeanstalk:
         - Name: Deploy
@@ -317,7 +289,7 @@ Resources:
                 Category: Deploy
                 Owner: AWS       
                 Provider: ElasticBeanstalk        
-                Version: 1                  # Don't know the purpose of 'version'
+                Version: 1                  # Don't know the purpose of 'version'.  Required and can only be 1.
               Configuration:
                 ApplicationName:  !Ref MyBeanstalkApplication  # See the EB definition below.       
                 EnvironmentName:  !Ref MyBeanstalkEnvironment  # See the EB definition below.       
@@ -340,7 +312,7 @@ Resources:
       OptionSettings: 
         - Namespace: aws:elasticbeanstalk:application
           OptionName: "Application Healthcheck URL"
-          Value: /info
+          Value: /
 
         - Namespace: aws:elasticbeanstalk:environment
           OptionName: ServiceRole
@@ -356,10 +328,10 @@ Resources:
       InstanceProfileName: !Sub ${AWS::StackName}-InstanceProfile
       Roles: [!Ref BeanstalkInstanceRole ]
 
-
 Outputs:
-  CodeBuild:
-    Value: !Ref MyPipe
-  IamRole:
-    Value: !Ref CodeBuildRole  
+  CodePipeline:
+    Value: !Sub https://${AWS::Region}.console.aws.amazon.com/codesuite/codepipeline/pipelines/${MyPipe}/view
 
+  RepositoryURI:
+    Value:  !Sub ${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${DockerImageName}
+    Description:  Docker image URI as stored in AWS ECR.
